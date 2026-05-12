@@ -154,7 +154,7 @@ echo -e "${GREEN}文件位置:${NC} $OUTPUT_FILE"
 # • 高动态场景（如快速运动）：提高帧率至 30fps，确保流畅度
 # WebP 相比 GIF 的优势：相同质量下体积小 30-50%，支持更多色彩和透明效果，是现代 Web 环境的更优选择。
 
-# 使用：./gifDuceNewHuman.sh "input.mp4" "output.webp" 00:01:00 00:00:10 30 1080 100
+# 使用：./video2webp_pro.sh "input.mp4" "output.webp" 00:01:00 00:00:10 30 1080 100
 
 # 方案二：在PowerShell中直接使用FFmpeg命令（Windows环境下使用）
 # 替换以下参数：

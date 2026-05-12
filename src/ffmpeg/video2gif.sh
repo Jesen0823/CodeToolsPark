@@ -14,8 +14,14 @@ command -v ffprobe >/dev/null 2>&1 || { echo -e "${RED}错误：未找到ffprobe
 # 检查输入参数
 if [ $# -lt 4 ]; then
     echo -e "${RED}错误：参数不足${NC}"
-    echo -e "${YELLOW}使用方法:${NC} ./$0 输入视频 输出GIF 开始时间 持续时间 [帧率] [宽度]"
-    echo -e "${YELLOW}示例:${NC} ./$0 input.mp4 output.gif 00:01:00 00:00:10 15 640"
+    echo -e "${YELLOW}使用方法:${NC} ./$0 输入视频 输出GIF 开始时间 持续时间 [帧率] [宽度] [qualityFirst]"
+    echo -e "${YELLOW}参数说明:${NC}"
+    echo -e "  帧率: 可选，默认24fps"
+    echo -e "  宽度: 可选，默认800px"
+    echo -e "  qualityFirst: 可选，true/1=质量优先（色彩极致还原），默认false（平衡模式）"
+    echo -e "${YELLOW}示例:${NC}"
+    echo -e "  平衡模式: ./$0 input.mp4 output.gif 00:01:00 00:00:10 15 640"
+    echo -e "  质量优先: ./$0 input.mp4 output.gif 00:01:00 00:00:10 30 1080 true"
     echo -e "${YELLOW}注意:${NC} 必须使用相对路径./$0执行，不能使用绝对路径/$0"
     exit 1
 fi
@@ -45,19 +51,37 @@ fi
 FPS=${5:-24}                 # 帧率，默认24（与其他脚本保持一致）
 WIDTH=${6:-800}              # 宽度，默认800px（与其他脚本保持一致）
 INTERPOLATION="lanczos"      # 缩放插值算法，lanczos质量较高
+QUALITY_FIRST="${7:-false}"  # 质量优先模式开关，默认false（平衡模式）
 
-# 调色板生成参数
+# 根据质量优先模式调整参数
+if [[ "$QUALITY_FIRST" == "true" || "$QUALITY_FIRST" == "1" ]]; then
+    # 质量优先模式：极致色彩还原，肤色自然饱满
+    DENOISE_PARAMS="0.2:0.1:0.5:0.3"      # 最小降噪，保留所有细节
+    SHARPEN_PARAMS="7:7:1.2:4:4:0.6"      # 强锐化，细节清晰
+    COLOR_PARAMS="contrast=1.03:brightness=0.01:saturation=1.12"  # 饱和度提升12%，肤色饱满
+    THRESHOLD=95                           # 更高阈值，保留更多肤色渐变
+    DITHER="floyd_steinberg"               # 最佳抖动
+    STATS_MODE="full"                      # 全帧分析
+    QUALITY_MODE="质量优先（极致还原）"
+else
+    # 平衡模式：压缩与质量平衡（默认）
+    DENOISE_PARAMS="0.3:0.2:0.8:0.6"      # 轻度降噪
+    SHARPEN_PARAMS="5:5:0.8:3:3:0.4"      # 标准锐化
+    COLOR_PARAMS="contrast=1.02:brightness=0.01:saturation=1.08"  # 适度饱和度
+    THRESHOLD=90                           # 标准阈值
+    DITHER="floyd_steinberg"               # 最佳抖动
+    STATS_MODE="full"                      # 全帧分析
+    QUALITY_MODE="平衡模式（压缩优先）"
+fi
+
+# 调色板生成参数 - 针对人像优化
 MAX_COLORS=256               # GIF最多256色
 RESERVE_TRANSPARENT="on"     # 保留透明色
-STATS_MODE="full"            # 统计模式: full（全帧）, diff（差异）, single（单帧）
 
-# 移除threshold参数以提高兼容性，不是所有FFmpeg版本都支持此参数
-THRESHOLD_OPTION=""
-
-# 调色板应用参数
-DITHER="floyd_steinberg"     # 抖动算法: bayer, heckbert, floyd_steinberg, sierra2等（floyd_steinberg视觉效果更好）
-DIFF_MODE="rectangle"        # 差异模式: rectangle（矩形）, none（无）
-NEW_PALETTE="off"            # 是否为每帧使用新调色板
+# 调色板应用参数 - 人像细节优化
+DIFF_MODE="rectangle"        # 差异模式（减小文件大小）
+NEW_PALETTE="off"            # 关闭动态调色板（保证色彩一致性）
+BAYER_SCALE=0                # Bayer抖动缩放（0=禁用，使用Floyd-Steinberg）
 
 # 核心：将DURATION（HH:MM:SS）转换为总秒数，用于动态计算帧数
 # 支持格式：SS、MM:SS、HH:MM:SS
@@ -94,6 +118,7 @@ fi
 echo -e "${GREEN}开始处理视频:${NC} $INPUT_FILE"
 echo -e "${GREEN}输出GIF:${NC} $OUTPUT_FILE"
 echo -e "${GREEN}参数:${NC} 开始=$START_TIME, 时长=$DURATION($DURATION_SECONDS秒), 帧率=$FPS, 宽度=$WIDTH"
+echo -e "${GREEN}模式:${NC} $QUALITY_MODE"
 echo -e "${GREEN}帧数控制:${NC} 计算所需帧数=$CALCULATED_FRAMES"
 
 # 检查输入视频分辨率，仅对720p以上视频应用色彩空间转换
@@ -107,24 +132,24 @@ else
     COLORSPACE_OPTION=""
 fi
 
-# 第一阶段：生成调色板（优化人物细节和兼容性）
+# 第一阶段：生成调色板（人像肤色优化）
 echo -e "${YELLOW}正在生成调色板...${NC}"
-# 极低的降噪参数，最大程度保留人物面部和身体细节
-# 轻微的锐化，保持自然效果
-# 适度的色彩调整，提高亮度和对比度
+# 根据质量模式调整参数
+# 质量优先：最小降噪、强锐化、高饱和度
+# 平衡模式：轻度降噪、标准锐化、适度饱和度
 ffmpeg -y -ss "$START_TIME" -t "$DURATION" -i "$INPUT_FILE" \
-  -vf "fps=$FPS,hqdn3d=0.3:0.2:0.8:0.6,scale=${WIDTH}:-1:flags=$INTERPOLATION$COLORSPACE_OPTION,unsharp=3:3:0.4:3:3:0.3,eq=contrast=1.01:brightness=0.02:saturation=1.02,palettegen=max_colors=$MAX_COLORS:reserve_transparent=$RESERVE_TRANSPARENT:stats_mode=$STATS_MODE$THRESHOLD_OPTION" \
+  -vf "fps=$FPS,hqdn3d=$DENOISE_PARAMS,scale=${WIDTH}:-1:flags=$INTERPOLATION$COLORSPACE_OPTION,unsharp=$SHARPEN_PARAMS,eq=$COLOR_PARAMS,palettegen=max_colors=$MAX_COLORS:reserve_transparent=$RESERVE_TRANSPARENT:stats_mode=$STATS_MODE:threshold=$THRESHOLD" \
   -frames:v 1 \
   -safe 0 \
   "$PALETTE" || { echo -e "${RED}生成调色板失败${NC}"; exit 1; }
 
-# 第二阶段：使用调色板生成GIF（优化人物细节和兼容性）
+# 第二阶段：使用调色板生成GIF（人像肤色优化）
 echo -e "${YELLOW}正在生成GIF...${NC}"
-# 使用与调色板生成阶段相同的滤镜参数
-# 极低的降噪参数，最大程度保留人物面部和身体细节
-# 确保人物细节在最终GIF中得到保留
+# 与调色板生成阶段保持一致的滤镜参数
+# Floyd-Steinberg抖动保留肤色渐变，避免棋盘伪影
+# 根据质量模式调整锐化和色彩
 ffmpeg -y -ss "$START_TIME" -t "$DURATION" -i "$INPUT_FILE" -i "$PALETTE" \
-  -lavfi "fps=$FPS,hqdn3d=0.3:0.2:0.8:0.6,scale=${WIDTH}:-1:flags=$INTERPOLATION$COLORSPACE_OPTION,unsharp=3:3:0.4:3:3:0.3,eq=contrast=1.01:brightness=0.02:saturation=1.02[x];[x][1:v]paletteuse=dither=$DITHER:diff_mode=$DIFF_MODE:new=$NEW_PALETTE" \
+  -lavfi "fps=$FPS,hqdn3d=$DENOISE_PARAMS,scale=${WIDTH}:-1:flags=$INTERPOLATION$COLORSPACE_OPTION,unsharp=$SHARPEN_PARAMS,eq=$COLOR_PARAMS[x];[x][1:v]paletteuse=dither=$DITHER:diff_mode=$DIFF_MODE:new=$NEW_PALETTE:bayer_scale=$BAYER_SCALE" \
   -loop 0 \
   -safe 0 \
   "$OUTPUT_FILE" || { echo -e "${RED}生成GIF失败${NC}"; exit 1; }

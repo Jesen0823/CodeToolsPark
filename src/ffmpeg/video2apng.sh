@@ -14,13 +14,15 @@ command -v ffprobe >/dev/null 2>&1 || { echo -e "${RED}错误：未找到ffprobe
 # 检查输入参数
 if [ $# -lt 4 ]; then
     echo -e "${RED}错误：参数不足${NC}"
-echo -e "${YELLOW}使用方法:${NC} ./$0 输入视频 输出APNG(必须带.apng扩展名) 开始时间 持续时间 [帧率] [宽度] [压缩级别] [帧数上限]"
+echo -e "${YELLOW}使用方法:${NC} ./$0 输入视频 输出APNG(必须带.apng扩展名) 开始时间 持续时间 [帧率] [宽度] [压缩级别] [qualityFirst]"
 echo -e "${YELLOW}参数说明:${NC}"
-echo -e "  帧率: 可选，默认24fps（建议15-30）"
-echo -e "  宽度: 可选，默认800px（高度自动按比例计算）"
-echo -e "  压缩级别: 可选，默认7（0-9，值越高压缩率越高，画质损失微小）"
-echo -e "  帧数上限: 可选，默认0（表示无限制）"
-echo -e "${YELLOW}示例:${NC} ./$0 input.mp4 output.apng 00:01:00 00:00:10 30 1080 7"
+echo -e "  帧率: 可选，默认30fps（建议15-30）"
+echo -e "  宽度: 可选，默认1080px（高度自动按比例计算）"
+echo -e "  压缩级别: 可选，默认5（0-9，值越高压缩率越高）"
+echo -e "  qualityFirst: 可选，true/1=质量优先（色彩极致还原），默认false（平衡模式）"
+echo -e "${YELLOW}示例:${NC}"
+echo -e "  平衡模式: ./$0 input.mp4 output.apng 00:01:00 00:00:10 30 1080 5"
+echo -e "  质量优先: ./$0 input.mp4 output.apng 00:01:00 00:00:10 30 1080 3 true"
 echo -e "${YELLOW}注意:${NC} 必须使用相对路径./$0执行，不能使用绝对路径/$0"
     exit 1
 fi
@@ -53,11 +55,30 @@ if [[ "$OUTPUT_FILE" != *.apng ]]; then
 fi
 
 # 视频处理参数（支持用户自定义）
-FPS=${5:-24}                  # 第5参数：帧率，默认24
-WIDTH=${6:-800}               # 第6参数：宽度，默认800px
-COMPRESSION_LEVEL=${7:-7}     # 第7参数：压缩级别，默认7（0-9，提高压缩率）
-MAX_FRAMES_CAP=${8:-0}        # 第8参数：帧数上限，0表示无限制
+FPS=${5:-30}                  # 第5参数：帧率，默认30（APNG支持高帧率，流畅度更好）
+WIDTH=${6:-1080}              # 第6参数：宽度，默认1080px（APNG支持高分辨率，细节更清晰）
+COMPRESSION_LEVEL=${7:-5}     # 第7参数：压缩级别，默认5（平衡质量与文件大小）
+QUALITY_FIRST="${8:-false}"   # 第8参数：质量优先模式开关，默认false（平衡模式）
+MAX_FRAMES_CAP=0              # 帧数上限，0表示无限制
 INTERPOLATION="lanczos"       # 高质量缩放算法
+COLORSPACE="bt709"            # 色彩空间（BT.709用于高清视频，肤色准确）
+
+# 根据质量优先模式调整参数
+if [[ "$QUALITY_FIRST" == "true" || "$QUALITY_FIRST" == "1" ]]; then
+    # 质量优先模式：极致色彩还原，肤色自然饱满
+    DENOISE_PARAMS="0.2:0.1:0.5:0.3"      # 最小降噪，保留所有细节
+    SHARPEN_PARAMS="7:7:1.2:4:4:0.6"      # 强锐化，细节清晰
+    COLOR_PARAMS="contrast=1.03:brightness=0.01:saturation=1.12"  # 饱和度提升12%，肤色饱满
+    COMPRESSION_LEVEL=3                    # 降低压缩级别，优先质量
+    QUALITY_MODE="质量优先（极致还原）"
+else
+    # 平衡模式：压缩与质量平衡（默认）
+    DENOISE_PARAMS="0.3:0.2:0.8:0.6"      # 轻度降噪
+    SHARPEN_PARAMS="5:5:0.8:3:3:0.4"      # 标准锐化
+    COLOR_PARAMS="contrast=1.02:brightness=0.01:saturation=1.08"  # 适度饱和度
+    # COMPRESSION_LEVEL 使用用户指定的值
+    QUALITY_MODE="平衡模式（压缩优先）"
+fi
 
 # 核心：将DURATION（HH:MM:SS）转换为总秒数，用于动态计算帧数
 # 支持格式：SS、MM:SS、HH:MM:SS
@@ -96,6 +117,7 @@ fi
 echo -e "${GREEN}开始处理视频:${NC} $INPUT_FILE"
 echo -e "${GREEN}输出APNG:${NC} $OUTPUT_FILE"
 echo -e "${GREEN}参数:${NC} 开始=$START_TIME, 时长=$DURATION($DURATION_SECONDS秒), 帧率=$FPS, 宽度=$WIDTH, 压缩级别=$COMPRESSION_LEVEL"
+echo -e "${GREEN}模式:${NC} $QUALITY_MODE"
 if [ "$MAX_FRAMES_CAP" -gt 0 ]; then
     echo -e "${GREEN}帧数控制:${NC} 计算所需帧数=$CALCULATED_FRAMES, 实际使用帧数=$MAX_FRAMES（上限=$MAX_FRAMES_CAP）"
 else
@@ -106,19 +128,20 @@ fi
 RESOLUTION=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$INPUT_FILE")
 echo -e "${YELLOW}源视频分辨率:${NC} $RESOLUTION"
 
-# 视频处理滤镜链（优化人物细节和兼容性）
-# 极低的降噪参数，最大程度保留人物面部和身体细节
-# 轻微的锐化，保持自然效果
-# 适度的色彩调整，提高亮度和对比度
+# 视频处理滤镜链（人像肤色与细节优化）
+# 根据质量模式调整参数
+# 质量优先：最小降噪、强锐化、高饱和度
+# 平衡模式：轻度降噪、标准锐化、适度饱和度
 FILTER_CHAIN="fps=$FPS,\
-hqdn3d=0.3:0.2:0.8:0.6,\
-unsharp=3:3:0.4:3:3:0.3,\
-eq=contrast=1.01:brightness=0.02:saturation=1.02,\
+hqdn3d=$DENOISE_PARAMS,\
+colorspace=$COLORSPACE,\
+unsharp=$SHARPEN_PARAMS,\
+eq=$COLOR_PARAMS,\
 scale=${WIDTH}:-1:flags=$INTERPOLATION,\
 select='lt(n,$MAX_FRAMES)',\
 setpts=N/$FPS/TB"
 
-# 核心转换命令
+# 核心转换命令 - APNG编码优化
 echo -e "${YELLOW}正在生成APNG动图...${NC}"
 ffmpeg -y \
   -ss "$START_TIME" -t "$DURATION" \

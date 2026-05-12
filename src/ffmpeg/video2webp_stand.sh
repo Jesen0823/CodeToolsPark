@@ -14,13 +14,15 @@ command -v ffprobe >/dev/null 2>&1 || { echo -e "${RED}错误：未找到ffprobe
 # 检查输入参数
 if [ $# -lt 4 ]; then
     echo -e "${RED}错误：参数不足${NC}"
-echo -e "${YELLOW}使用方法:${NC} ./$0 输入视频 输出WebP(必须带.webp扩展名) 开始时间 持续时间 [帧率] [宽度] [质量(0-100)] [帧数上限]"
+echo -e "${YELLOW}使用方法:${NC} ./$0 输入视频 输出WebP(必须带.webp扩展名) 开始时间 持续时间 [帧率] [宽度] [质量(0-100)] [qualityFirst]"
 echo -e "${YELLOW}参数说明:${NC}"
-echo -e "  帧率: 可选，默认24fps（建议24-30）"
-echo -e "  宽度: 可选，默认800px（高度自动按比例计算）"
-echo -e "  质量: 可选，默认80（0-100，值越高质量越好）"
-echo -e "  帧数上限: 可选，默认0（表示无限制）"
-echo -e "${YELLOW}示例:${NC} ./$0 input.mp4 output.webp 00:01:00 00:00:10 30 1080 90"
+echo -e "  帧率: 可选，默认30fps（建议24-30）"
+echo -e "  宽度: 可选，默认1080px（高度自动按比例计算）"
+echo -e "  质量: 可选，默认90（0-100，值越高质量越好）"
+echo -e "  qualityFirst: 可选，true/1=质量优先（色彩极致还原），默认false（平衡模式）"
+echo -e "${YELLOW}示例:${NC}"
+echo -e "  平衡模式: ./$0 input.mp4 output.webp 00:01:00 00:00:10 30 1080 90"
+echo -e "  质量优先: ./$0 input.mp4 output.webp 00:01:00 00:00:10 30 1080 95 true"
 echo -e "${YELLOW}注意:${NC} 必须使用相对路径./$0执行，不能使用绝对路径/$0"
     exit 1
 fi
@@ -52,17 +54,45 @@ if [[ ! "$OUTPUT_FILE" =~ \.webp$ ]]; then
     exit 1
 fi
 
-# WebP处理参数
-FPS=${5:-24}
-WIDTH=${6:-800}
-QUALITY=${7:-80}
+# WebP处理参数 - 人像高保真优化
+FPS=${5:-30}                  # 第5参数：帧率，默认30（WebP支持高帧率）
+WIDTH=${6:-1080}              # 第6参数：宽度，默认1080px（高分辨率保留细节）
+QUALITY=${7:-90}              # 第7参数：质量，默认90（极致保真，肤色逼真）
+QUALITY_FIRST="${8:-false}"   # 第8参数：质量优先模式开关，默认false（平衡模式）
 INTERPOLATION="lanczos"
-MAX_FRAMES_CAP=${8:-0}  # 帧数上限，0表示无限制
-COMPRESSION_LEVEL=6
+MAX_FRAMES_CAP=0              # 帧数上限，0表示无限制
+COLORSPACE="bt709"            # 色彩空间（BT.709用于高清视频）
+
+# 根据质量优先模式调整参数
+if [[ "$QUALITY_FIRST" == "true" || "$QUALITY_FIRST" == "1" ]]; then
+    # 质量优先模式：极致色彩还原，肤色自然饱满
+    DENOISE_PARAMS="0.2:0.1:0.5:0.3"      # 最小降噪，保留所有细节
+    SHARPEN_PARAMS="7:7:1.2:4:4:0.6"      # 强锐化，细节清晰
+    COLOR_PARAMS="contrast=1.03:brightness=0.01:saturation=1.12"  # 饱和度提升12%，肤色饱满
+    COMPRESSION_LEVEL=6                    # 最高压缩级别
+    METHOD=6                               # 最高编码方法
+    QUALITY=95                             # 提升质量到95
+    QUALITY_MODE="质量优先（极致还原）"
+else
+    # 平衡模式：压缩与质量平衡（默认）
+    DENOISE_PARAMS="0.3:0.2:0.8:0.6"      # 轻度降噪
+    SHARPEN_PARAMS="5:5:0.8:3:3:0.4"      # 标准锐化
+    COLOR_PARAMS="contrast=1.02:brightness=0.01:saturation=1.08"  # 适度饱和度
+    COMPRESSION_LEVEL=6                    # WebP压缩级别（6为最高）
+    METHOD=6                               # WebP编码方法（6为最高质量）
+    # QUALITY 使用用户指定的值
+    QUALITY_MODE="平衡模式（压缩优先）"
+fi
 
 # 校验质量参数范围
 if ! [[ "$QUALITY" =~ ^[0-9]+$ ]] || [ "$QUALITY" -lt 0 ] || [ "$QUALITY" -gt 100 ]; then
     echo -e "${RED}错误：质量参数必须是0-100之间的整数${NC}"
+    exit 1
+fi
+
+# 校验方法参数范围
+if ! [[ "$METHOD" =~ ^[0-6]$ ]]; then
+    echo -e "${RED}错误：编码方法必须是0-6之间的整数${NC}"
     exit 1
 fi
 
@@ -98,6 +128,7 @@ fi
 echo -e "${GREEN}开始处理视频:${NC} $INPUT_FILE"
 echo -e "${GREEN}输出WebP:${NC} $OUTPUT_FILE"
 echo -e "${GREEN}参数:${NC} 开始=$START_TIME, 时长=$DURATION($DURATION_SECONDS秒), 帧率=$FPS, 宽度=$WIDTH, 质量=$QUALITY"
+echo -e "${GREEN}模式:${NC} $QUALITY_MODE"
 if [ "$MAX_FRAMES_CAP" -gt 0 ]; then
     echo -e "${GREEN}帧数控制:${NC} 计算所需帧数=$CALCULATED_FRAMES, 实际使用帧数=$MAX_FRAMES（上限=$MAX_FRAMES_CAP）"
 else
@@ -108,20 +139,21 @@ fi
 RESOLUTION=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$INPUT_FILE")
 echo -e "${YELLOW}源视频分辨率:${NC} $RESOLUTION"
 
-# 视频处理滤镜链（优化人物细节和兼容性）
-# 极低的降噪参数，最大程度保留人物面部和身体细节
-# 轻微的锐化，保持自然效果
-# 适度的色彩调整，提高亮度和对比度
+# 视频处理滤镜链（人像肤色与细节优化）
+# 根据质量模式调整参数
+# 质量优先：最小降噪、强锐化、高饱和度
+# 平衡模式：轻度降噪、标准锐化、适度饱和度
 FILTER_CHAIN="\
 fps=$FPS,\
-hqdn3d=0.3:0.2:0.8:0.6,\
-unsharp=3:3:0.4:3:3:0.3,\
-eq=contrast=1.01:brightness=0.02:saturation=1.02,\
+hqdn3d=$DENOISE_PARAMS,\
+colorspace=$COLORSPACE,\
+unsharp=$SHARPEN_PARAMS,\
+eq=$COLOR_PARAMS,\
 scale=${WIDTH}:-1:flags=$INTERPOLATION,\
 select='lt(n,$MAX_FRAMES)',\
 setpts=N/$FPS/TB"
 
-# 核心转换命令
+# 核心转换命令 - WebP编码优化
 echo -e "${YELLOW}正在生成WebP动图...${NC}"
 ffmpeg -y \
   -ss "$START_TIME" -t "$DURATION" \
@@ -131,7 +163,8 @@ ffmpeg -y \
   -loop 0 \
   -qscale:v "$QUALITY" \
   -compression_level "$COMPRESSION_LEVEL" \
-  -preset default \
+  -method "$METHOD" \
+  -preset photo \
   -an \
   -safe 0 \
   "$OUTPUT_FILE" || { echo -e "${RED}生成WebP失败${NC}"; exit 1; }
@@ -162,7 +195,7 @@ echo -e "${GREEN}文件位置:${NC} $OUTPUT_FILE"
 # • 高动态场景（如快速运动）：提高帧率至 30fps，确保流畅度
 # WebP 相比 GIF 的优势：相同质量下体积小 30-50%，支持更多色彩和透明效果，是现代 Web 环境的更优选择。
 
-# 使用：./gifDuceNewHuman.sh "input.mp4" "output.webp" 00:01:00 00:00:10 30 1080 100
+# 使用：./video2webp_stand.sh "input.mp4" "output.webp" 00:01:00 00:00:10 30 1080 100
 
 # 方案二：在PowerShell中直接使用FFmpeg命令（Windows环境下使用）
 # 替换以下参数：
